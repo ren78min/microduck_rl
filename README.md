@@ -267,5 +267,9 @@ joint-index mappings, reward sign conventions, and NaN guards.
 
 ## License
 
-This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE) file for details.
-3D model files are licensed under Creative Commons BY-SA-NC.
+The code in this repository is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+
+The 3D model files (the `.stl` meshes in `src/mjlab_microduck/robot/microduck/assets/`
+and `src/mjlab_microduck/robot/xl330_test_bench/assets/`) are licensed under
+[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+See [LICENSE-MODELS.md](LICENSE-MODELS.md) for the exact scope and attribution.
