@@ -4781,6 +4781,22 @@ class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
         return VelocityCommandCommandOnly(self, env)
 
 
+class ZeroPaddedVelocityCommand(VelocityCommandCommandOnly):
+    """Twist slot of a task with NO velocity command (sampled in tiny ranges
+    only to keep the obs neurons alive). Skips the viewer joystick: mjlab's
+    viser "Max" slider has a hard floor of 0.1, so ranges like ±0.01 crash
+    `play` at GUI creation — and a joystick is meaningless here anyway."""
+
+    def create_gui(self, *args, **kwargs) -> None:
+        return None
+
+
+@_dataclass(kw_only=True)
+class ZeroPaddedVelocityCommandCfg(VelocityCommandCommandOnlyCfg):
+    def build(self, env: ManagerBasedRlEnv) -> "ZeroPaddedVelocityCommand":
+        return ZeroPaddedVelocityCommand(self, env)
+
+
 class RelativeHeadingVelocityCommand(VelocityCommandCommandOnly):
     """Velocity command where cmd[2] is the heading error in the robot's body frame.
 
@@ -7911,3 +7927,144 @@ def run_double_support_penalty(
     assert contact_time is not None
     double = (contact_time > 0.0).all(dim=1).float()
     return -double * _run_cmd_ramp(env, command_name, cmd_lo, cmd_hi)
+
+
+# ==============================================================================
+# One-leg hop (microduck_one_leg_hop_env_cfg.py)
+# ==============================================================================
+# Feet are indexed by their column in the 2-foot contact sensor
+# (feet_ground_contact: LEFT = 0, RIGHT = 1). The SUPPORT foot hops; the FREE
+# foot must stay off the ground (after a short lift-off grace at reset).
+
+
+def _heading_frame_lin_vel(asset: Entity) -> tuple[torch.Tensor, torch.Tensor]:
+    """Trunk (forward, lateral) velocity in the yaw-only heading frame.
+
+    Body-frame vx would mix in vertical velocity whenever the trunk pitches
+    (it pitches every hop), so project the world velocity onto the trunk's
+    horizontal heading instead.
+    """
+    fwd = quat_apply(
+        asset.data.root_link_quat_w,
+        torch.tensor([1.0, 0.0, 0.0], device=asset.data.root_link_quat_w.device).expand(
+            asset.data.root_link_quat_w.shape[0], 3
+        ),
+    )[:, :2]
+    fwd = fwd / fwd.norm(dim=1, keepdim=True).clamp(min=1e-6)
+    left = torch.stack([-fwd[:, 1], fwd[:, 0]], dim=1)
+    v_xy = asset.data.root_link_lin_vel_w[:, :2]
+    vx = torch.nan_to_num((v_xy * fwd).sum(dim=1), nan=0.0)
+    vy = torch.nan_to_num((v_xy * left).sum(dim=1), nan=0.0)
+    return vx, vy
+
+
+def _foot_down(env: ManagerBasedRlEnv, sensor_name: str, foot_index: int) -> torch.Tensor:
+    """Bool (num_envs,): the foot in column ``foot_index`` touches the terrain."""
+    found = env.scene.sensors[sensor_name].data.found
+    return found[:, foot_index] > 0
+
+
+def hop_forward_velocity(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    free_foot_index: int,
+    max_speed: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Heading-frame forward speed, LINEAR, paid only while the free foot is up.
+
+    Linear (not a saturating Gaussian/tanh) because the goal is MAXIMUM speed:
+    the gradient must not die at high speed. Summed over an episode it is the
+    distance hopped, so it can't be farmed by oscillating (backward motion is
+    negative). The clamp is a sanity bound far above anything reachable.
+    Gated on the free foot being airborne: two-footed shuffling during the
+    lift-off grace earns nothing.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    vx, _ = _heading_frame_lin_vel(asset)
+    free_up = (~_foot_down(env, sensor_name, free_foot_index)).float()
+    return vx.clamp(-max_speed, max_speed) * free_up
+
+
+def hop_lateral_velocity_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Heading-frame lateral speed² (cost, ≥ 0 → negative weight)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _, vy = _heading_frame_lin_vel(asset)
+    return vy.pow(2)
+
+
+def free_foot_contact_cost(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    free_foot_index: int,
+) -> torch.Tensor:
+    """1 while the free foot touches the terrain (cost, ≥ 0 → negative weight).
+
+    After the grace window this state terminates the episode anyway; this term
+    prices it DURING the grace so lifting off early is preferred.
+    """
+    return _foot_down(env, sensor_name, free_foot_index).float()
+
+
+def free_foot_up_alive(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    free_foot_index: int,
+) -> torch.Tensor:
+    """1 per step alive in single support / flight (the task's GOOD state)."""
+    alive = ~env.termination_manager.terminated
+    return (alive & ~_foot_down(env, sensor_name, free_foot_index)).float()
+
+
+def support_foot_air_time(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    support_foot_index: int,
+    free_foot_index: int,
+    threshold_min: float = 0.03,
+    threshold_max: float = 0.25,
+) -> torch.Tensor:
+    """1 per step while the SUPPORT foot has been airborne for a time inside
+    [threshold_min, threshold_max] and the free foot is up too — i.e. a real
+    flight phase, not a shuffle. The upper bound keeps it from paying for
+    tumbling through the air; the window makes it a bounded per-hop payout.
+    """
+    sensor = env.scene.sensors[sensor_name]
+    air = sensor.data.current_air_time
+    if air is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    t = torch.nan_to_num(air[:, support_foot_index], nan=0.0)
+    in_window = (t > threshold_min) & (t < threshold_max)
+    free_up = ~_foot_down(env, sensor_name, free_foot_index)
+    return (in_window & free_up).float()
+
+
+def one_leg_illegal_contact(
+    env: ManagerBasedRlEnv,
+    body_sensor_name: str,
+    feet_sensor_name: str,
+    free_foot_index: int,
+    grace_s: float = 1.0,
+) -> torch.Tensor:
+    """Terminate when anything but the support foot touches the terrain.
+
+    - Any body in ``body_sensor_name`` (trunk, head, hips, shanks) → always.
+    - The free foot → only after ``grace_s`` from reset (the robot spawns
+      standing on both feet and needs a moment to shift onto one leg).
+    """
+    body_found = env.scene.sensors[body_sensor_name].data.found
+    body_hit = (body_found > 0).any(dim=1)
+    t = env.episode_length_buf.float() * env.step_dt
+    free_down = _foot_down(env, feet_sensor_name, free_foot_index)
+    return body_hit | (free_down & (t > grace_s))
+
+
+def episode_time_frac(env: ManagerBasedRlEnv, horizon_s: float) -> torch.Tensor:
+    """clamp(t / horizon_s, 0, 1) as a (num_envs, 1) obs. CRITIC-ONLY: lets the
+    value function know whether the lift-off grace has elapsed (the actor's 61D
+    layout is frozen)."""
+    t = env.episode_length_buf.float() * env.step_dt
+    return (t / horizon_s).clamp(0.0, 1.0).unsqueeze(-1)

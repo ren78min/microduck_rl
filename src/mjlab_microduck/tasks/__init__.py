@@ -79,6 +79,10 @@ from .microduck_run_env_cfg import (
     make_microduck_run_env_cfg,
     MicroduckRunRlCfg,
 )
+from .microduck_one_leg_hop_env_cfg import (
+    make_microduck_one_leg_hop_env_cfg,
+    MicroduckOneLegHopRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -254,6 +258,16 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# OneLegHop — hop forward on one leg (HOP_LEG flag, right by default) as fast
+# as possible without falling (flat ground only).
+register_mjlab_task(
+    task_id="Mjlab-OneLegHop-Flat-MicroDuck",
+    env_cfg=make_microduck_one_leg_hop_env_cfg(),
+    play_env_cfg=make_microduck_one_leg_hop_env_cfg(play=True),
+    rl_cfg=MicroduckOneLegHopRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Backlash variants — ±1° serial gear play per servo + encoder-through-backlash
 # actuator feedback and joint obs (see tasks/backlash.py). Each family keeps its
 # base task's collision model: Velocity → robot_walk_backlash.xml,
@@ -288,6 +302,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-GroundPick-Flat-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-GroundPick-Rough-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {"rough": True}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-BallKick-Flat-Backlash-MicroDuck", make_microduck_ball_kick_env_cfg, {}, MicroduckBallKickRlCfg, _BL_GROUNDCONTACT),
+    ("Mjlab-OneLegHop-Flat-Backlash-MicroDuck", make_microduck_one_leg_hop_env_cfg, {}, MicroduckOneLegHopRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck-Rollers", make_microduck_velocity_rollers_env_cfg, {}, MicroduckRollersRlCfg, _BL_ROLLERS),
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
